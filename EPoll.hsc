@@ -11,6 +11,7 @@ import Foreign.Ptr
 import Foreign.C.Types
 import Foreign.C.Error
 import Data.Bits
+import Control.Concurrent.MVar
 
 #include <sys/epoll.h>
 
@@ -49,7 +50,9 @@ fromOpts = foldl' (\x y -> x .|. (fromOpt y)) (0 :: Word32)
 toOpts :: Word32 -> [EPollOpt]
 toOpts oWord = filter (\o -> (fromOpt o .&. oWord) /= 0) allOpts 
 
-data EPoll a = EPoll CInt (Map CInt a)
+-- TODO this sucks, cannot have an MVar here... At least we avoid race conditions but that's about it
+-- TODO investigate use of Fd type?
+data EPoll a = EPoll CInt (MVar (Map CInt a))
 
 -- TODO handle multiple calls to ctl, we have no reference to data assigned to file descriptor
 
@@ -80,10 +83,11 @@ foreign import ccall unsafe "sys/epoll.h epoll_create"
 
 create = do
     fd <- c_epoll_create 1
-    if fd == -1 then
+    if fd == -1 then do
         throwErrno "call to epoll_create failed"
-    else
-        return (EPoll fd Map.empty)
+    else do
+        mv <- newMVar Map.empty
+        return (EPoll fd mv)
 
 -- Close
 close :: EPoll a -> IO ()
@@ -94,7 +98,7 @@ close (EPoll fd _) = c_close fd
 -- Wait
 wait :: Int -> EPoll a -> IO [(Word32, a)]
 
-foreign import ccall unsafe "sys/epoll.h epoll_wait"
+foreign import ccall safe "sys/epoll.h epoll_wait"
     c_epoll_wait :: CInt -> Ptr EPollEvent -> CInt -> CInt -> IO CInt
 
 waitInternal :: (Map CInt a) -> CInt -> Int -> (Ptr EPollEvent) -> IO [(Word32, a)]
@@ -118,59 +122,61 @@ waitInternal fdmap epollfd num ptr = do
                getEvts ptr res
 
 
-wait num (EPoll fd fdmap) = do
+wait num (EPoll fd fdmap') = do
+    fdmap <- takeMVar fdmap'
     evts <- allocaBytes (num * evtsize) (waitInternal fdmap fd num)
+    putMVar fdmap' fdmap
     return evts
-
-
--- TODO can we store a pointer directly in event, this should quicken access later.
--- Requirement: if we use stable pointers we need to make sure they are released
--- Could probably make this part of cleanup of thread, we should just make sure data is never accessed later
--- maybe signal epoll thread to remove stuff
 
 
 -- TODO add error handling, look at Foreign.C.Error
 
 -- Ctl
 
-add :: EPoll a -> CInt -> Word32 -> a -> IO (EPoll a)
+add :: EPoll a -> CInt -> Word32 -> a -> IO ()
 
 foreign import ccall unsafe "sys/epoll.h epoll_ctl"
     c_epoll_ctl :: CInt -> CInt -> CInt -> Ptr EPollEvent -> IO CInt
 
-add (EPoll epollfd fdmap) fd opts d = do
+add (EPoll epollfd fdmap') fd opts d = do
+    fdmap <- takeMVar fdmap'
     if Map.notMember fd fdmap then do
         res <- alloca $ \ptr -> do
             poke ptr (EPollEvent opts fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_ADD) fd ptr
-        if res == -1 then
+        putMVar fdmap' (Map.insert fd d fdmap)
+        if res == -1 then do
             throwErrno "epoll_ctl(EPOLL_CTL_ADD) call failed"
         else
-            return (EPoll epollfd (Map.insert fd d fdmap))
+            return ()
     else
         error "add: fd already member of fdmap"
 
-del :: EPoll a -> CInt -> IO (EPoll a)
-del (EPoll epollfd fdmap) fd = do
+del :: EPoll a -> CInt -> IO ()
+del (EPoll epollfd fdmap') fd = do
+    fdmap <- takeMVar fdmap'
     if Map.member fd fdmap then do
         res <- c_epoll_ctl epollfd (#const EPOLL_CTL_DEL) fd nullPtr
-        if res == -1 then
+        putMVar fdmap' (Map.delete fd fdmap)
+        if res == -1 then do
             throwErrno "epoll_ctl(EPOLL_CTL_DEL) call failed"
         else
-            return (EPoll epollfd (Map.delete fd fdmap))
+            return ()
     else
         error "del: fd not member of fdmap"
 
-mod :: EPoll a -> CInt -> Word32 -> a ->  IO (EPoll a)
-mod (EPoll epollfd fdmap) fd opts d = do
+mod :: EPoll a -> CInt -> Word32 -> a ->  IO ()
+mod (EPoll epollfd fdmap') fd opts d = do
+    fdmap <- takeMVar fdmap'
     if Map.member fd fdmap then do
         res <- alloca $ \ptr -> do
             poke ptr (EPollEvent opts fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_MOD) fd ptr
-        if res == -1 then
+        putMVar fdmap' (Map.insert fd d fdmap)
+        if res == -1 then do
             throwErrno "epoll_ctl(EPOLL_CTL_MOD) call failed"
         else
-            return (EPoll epollfd (Map.insert fd d fdmap))
+            return ()
     else
         error "mod: fd not member of fdmap"
 
