@@ -2,12 +2,12 @@
 
 module EPoll (
       EPoll
-    , EPollEvt
-    , EPollOpts
+    , EPollEvt (..)
+    , EPollOpt (..)
     , create
-    , add
-    , del
-    , mod
+    , register
+    , unregister
+    , reregister
 ) where
 
 import Data.Word (Word32)
@@ -114,7 +114,7 @@ create = do
 close :: EPoll a -> IO ()
 foreign import ccall unsafe "unistd.h close" c_close :: CInt -> IO ()
 
-close (EPoll fd _) = doc_close fd
+close (EPoll fd _) = c_close fd
 
 -- Wait
 wait :: Int -> EPoll a -> IO [([EPollEvt], a)]
@@ -160,10 +160,10 @@ wait num (EPoll fd fdmap') = do
 foreign import ccall unsafe "sys/epoll.h epoll_ctl"
     c_epoll_ctl :: CInt -> CInt -> CInt -> Ptr EPollEvent -> IO CInt
 
--- TODO revert stm ops on error for add, del and mod
+-- TODO revert stm ops on error for register, unregister and reregister
 
-add :: EPoll a -> CInt -> Word32 -> a -> IO ()
-add (EPoll epollfd fdmap') fd opts d = do
+register :: EPoll a -> CInt -> [EPollOpt] -> a -> IO ()
+register (EPoll epollfd fdmap') fd opts d = do
     member <- atomically (do
         fdmap <- readTVar fdmap'
         if not (Map.member fd fdmap) then do
@@ -174,17 +174,17 @@ add (EPoll epollfd fdmap') fd opts d = do
 
     if member then do
         res <- alloca $ \ptr -> do
-            poke ptr (EPollEvent opts fd)
+            poke ptr (EPollEvent (fromOpts opts) fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_ADD) fd ptr
         if res == -1 then do
             throwErrno "epoll_ctl(EPOLL_CTL_ADD) call failed"
         else
             return ()
     else
-        error "add: fd member of fdmap"
+        error "register: fd member of fdmap"
 
-del :: EPoll a -> CInt -> IO ()
-del (EPoll epollfd fdmap') fd = do
+unregister :: EPoll a -> CInt -> IO ()
+unregister (EPoll epollfd fdmap') fd = do
     member <- atomically (do
         fdmap <- readTVar fdmap'
         if Map.member fd fdmap then do
@@ -200,10 +200,10 @@ del (EPoll epollfd fdmap') fd = do
         else
             return ()
     else
-        error "del: fd not member of fdmap"
+        error "unregister: fd not member of fdmap"
 
-mod :: EPoll a -> CInt -> Word32 -> a ->  IO ()
-mod (EPoll epollfd fdmap') fd opts d = do
+reregister :: EPoll a -> CInt -> [EPollOpt] -> a ->  IO ()
+reregister (EPoll epollfd fdmap') fd opts d = do
     member <- atomically (do
         fdmap <- readTVar fdmap'
         if Map.member fd fdmap then do
@@ -214,12 +214,12 @@ mod (EPoll epollfd fdmap') fd opts d = do
 
     if member then do
         res <- alloca $ \ptr -> do
-            poke ptr (EPollEvent opts fd)
+            poke ptr (EPollEvent (fromOpts opts) fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_MOD) fd ptr
         if res == -1 then do
             throwErrno "epoll_ctl(EPOLL_CTL_MOD) call failed"
         else
             return ()
     else
-        error "mod: fd not member of fdmap"
+        error "reregister: fd not member of fdmap"
 
