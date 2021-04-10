@@ -124,6 +124,11 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
         asyncSendPtr s (ptr `plusPtr` res) (num - res)
     else return ()
 
+
+-- Build some kind of monad containing request?
+
+-- getHeaders
+
 handleRequest :: WrappedSocket -> IO ()
 handleRequest sock = do
     bs <- asyncRecv sock 1024
@@ -194,3 +199,4 @@ main = do
     let handleEpoll = wait 20 epoll >>= mapM (handleEPollEvent epoll) in
         catchIOError (infinitely handleEpoll)
                      (\exc -> putStrLn ("Main error: " ++ show exc) >> killSocket wrapped)
+
