@@ -1,16 +1,26 @@
-HSCSRC=EPoll.hsc
-SRC=$(HSCSRC:.hsc=.hs)
+HSCSRC=		EPoll.hsc Socket.hsc
+FROMHSC=	$(HSCSRC:.hsc=.hs)
+SRC=		$(FROMHSC)
+OBJS=		$(SRC:.hs=.o)
 
-.PHONY: clean
+BIN=		Main
 
-.SUFFIXES: .hsc .hs
+.PHONY: clean objs
+
+.SUFFIXES: .hsc .hs .o
+
+all: $(SRC)
+	ghc -threaded $(SRC) Main
 
 .hsc.hs:
 	hsc2hs -o $@ $< 
 
-all: $(SRC)
-	ghc Main.hs
+.hs.o:
+	ghc $<
+
+objs: $(OBJS)
+	@echo "built objects"
 
 clean:
-	rm -rf *.o *.hi Main
+	rm -rf *.o *.hi Main $(FROMHSC)
 

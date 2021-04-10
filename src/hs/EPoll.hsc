@@ -1,9 +1,10 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface #-}
 
-module EPoll (
+module Lowl.EPoll (
       EPoll
     , EPollEvt (..)
     , EPollOpt (..)
+    , wait
     , create
     , register
     , unregister
@@ -21,6 +22,7 @@ import Foreign.C.Error
 import Data.Bits
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
+import System.IO.Error
 
 #include <sys/epoll.h>
 
@@ -105,7 +107,7 @@ foreign import ccall unsafe "sys/epoll.h epoll_create"
 create = do
     fd <- c_epoll_create 1
     if fd == -1 then do
-        throwErrno "call to epoll_create failed"
+        throwErrno "epoll_create()"
     else do
         fdmap <- atomically (do fdmap <- newTVar Map.empty; return fdmap)
         return (EPoll fd fdmap)
@@ -134,11 +136,11 @@ waitInternal epollfd num ptr = do
                 return ((evts, fd) : rest)
         in if res == -1 then do
                errno <- getErrno
-               if errno == eINTR then do
+               if errno == eINTR then do -- TODO gather EINTR handling under common ifc
                    putStrLn "EPoll interrupted"
                    waitInternal epollfd num ptr
                else
-                   throwErrno "Call to epoll_wait failed" -- TODO improve error handling
+                   throwErrno "epoll_wait()" -- TODO improve error handling
            else
                getEvts ptr res
 
@@ -177,11 +179,11 @@ register (EPoll epollfd fdmap') fd opts d = do
             poke ptr (EPollEvent (fromOpts opts) fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_ADD) fd ptr
         if res == -1 then do
-            throwErrno "epoll_ctl(EPOLL_CTL_ADD) call failed"
+            throwErrno "epoll_ctl(EPOLL_CTL_ADD)"
         else
             return ()
     else
-        error "register: fd member of fdmap"
+        ioError $ userError "register: fd member of fdmap"
 
 unregister :: EPoll a -> CInt -> IO ()
 unregister (EPoll epollfd fdmap') fd = do
@@ -192,15 +194,14 @@ unregister (EPoll epollfd fdmap') fd = do
             return True
         else
             return False)
-    
     if member then do
         res <- c_epoll_ctl epollfd (#const EPOLL_CTL_DEL) fd nullPtr
         if res == -1 then do
-            throwErrno "epoll_ctl(EPOLL_CTL_DEL) call failed"
+            throwErrno "epoll_ctl(EPOLL_CTL_DEL)"
         else
             return ()
     else
-        error "unregister: fd not member of fdmap"
+        ioError $ userError "unregister: fd not member of fdmap"
 
 reregister :: EPoll a -> CInt -> [EPollOpt] -> a ->  IO ()
 reregister (EPoll epollfd fdmap') fd opts d = do
@@ -217,9 +218,9 @@ reregister (EPoll epollfd fdmap') fd opts d = do
             poke ptr (EPollEvent (fromOpts opts) fd)
             c_epoll_ctl epollfd (#const EPOLL_CTL_MOD) fd ptr
         if res == -1 then do
-            throwErrno "epoll_ctl(EPOLL_CTL_MOD) call failed"
+            throwErrno "epoll_ctl(EPOLL_CTL_MOD)"
         else
             return ()
     else
-        error "reregister: fd not member of fdmap"
+        ioError $ userError "reregister: fd not member of fdmap"
 
