@@ -127,7 +127,10 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
 
 -- Build some kind of monad containing request?
 
+-- getType
+-- getURI
 -- getHeaders
+-- getBody - this should return some kind of lazy datatype?
 
 handleRequest :: WrappedSocket -> IO ()
 handleRequest sock = do
