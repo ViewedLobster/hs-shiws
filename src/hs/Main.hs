@@ -1,5 +1,3 @@
--- TODO implement socket handling
-
 import Control.Concurrent.MVar
 import Control.Concurrent
 import System.IO.Error
@@ -154,6 +152,18 @@ instance Monad Request where
 execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
 execRequest (Request sockAct) req sock = sockAct (sock, req)
 
+-- TODO parse start-line
+-- TODO parse headers
+-- TODO handle chunked encoding
+-- TODO handle content length
+
+parseStartLine :: ByteString -> (ByteString, HTTPMethod, ByteString)
+parseStartLine = undefined
+
+parseHeaders :: ByteString -> (ByteString, Headers)
+parseHeaders = undefined
+
+
 data HTTPMethod = Get
                 | Post
                 | Head
@@ -175,8 +185,12 @@ reqPath = Request $ \ (_, info) -> return (path info)
 reqHeaders :: Request [(BS.ByteString, BS.ByteString)]
 reqHeaders = Request $ \ (_, info) -> return (headers info)
 
-reqBodyBytes :: Int -> Request BS.ByteString
+reqBodyChunk :: Int -> Request BS.ByteString
 reqBodyBytes = undefined
+
+withReqBodyBytes :: ([Word8] -> a) -> Request a
+
+withReqBodyChunks :: ([ByteString] -> a) -> Request a
 
 handleRequest :: WrappedSocket -> IO ()
 handleRequest sock = do
