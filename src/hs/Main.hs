@@ -11,6 +11,10 @@ import Foreign.C.String
 import Data.Word
 import Data.List
 
+import Control.Monad
+import Control.Applicative
+import Control.Monad
+
 
 import Lowl.EPoll (
       EPoll
@@ -128,9 +132,51 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
 -- Build some kind of monad containing request?
 
 -- getType
--- getURI
+-- getPath
 -- getHeaders
 -- getBody - this should return some kind of lazy datatype?
+-- getBodyContent
+--
+newtype Request a = Request ((WrappedSocket, RequestInfo) -> IO a)
+
+instance Functor Request where
+    fmap = liftM
+
+instance Applicative Request where
+    pure a = Request (\ws -> return a)
+    (<*>) = ap
+
+instance Monad Request where
+    Request now >>= after =
+        Request $ \req ->
+            now req >>= \val -> let Request next = after val in next req
+
+execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
+execRequest (Request sockAct) req sock = sockAct (sock, req)
+
+data HTTPMethod = Get
+                | Post
+                | Head
+                | Delete
+
+data RequestInfo = RequestInfo
+    {
+        method :: HTTPMethod
+      , path :: BS.ByteString
+      , headers :: [(BS.ByteString, BS.ByteString)]
+    }
+
+reqMethod :: Request HTTPMethod
+reqMethod = Request $ \ (_, info) -> return (method info)
+
+reqPath :: Request BS.ByteString
+reqPath = Request $ \ (_, info) -> return (path info)
+
+reqHeaders :: Request [(BS.ByteString, BS.ByteString)]
+reqHeaders = Request $ \ (_, info) -> return (headers info)
+
+reqBodyBytes :: Int -> Request BS.ByteString
+reqBodyBytes = undefined
 
 handleRequest :: WrappedSocket -> IO ()
 handleRequest sock = do
