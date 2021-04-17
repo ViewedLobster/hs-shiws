@@ -1,6 +1,9 @@
+{-# OverloadedStrings #-}
+
 import Control.Concurrent.MVar
 import Control.Concurrent
 import System.IO.Error
+import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Foreign
 import Foreign.Ptr
@@ -36,6 +39,11 @@ import Lowl.Socket (
     , unsafeSendPtr
     , close
     , unsafeUsingSocketFd )
+
+import HTTPParse (
+      runParser
+    , httpReqStart
+    , httpHeaderFields )
 
 newtype RdySignal = RdySignal (MVar (Bool, [MVar ()]))
 
@@ -90,7 +98,7 @@ wakeupOrSet (RdySignal sig) = do
         _          ->
             putMVar sig (True, waiting)
 
-asyncRecv :: WrappedSocket -> Int -> IO BS.ByteString
+asyncRecv :: WrappedSocket -> Int -> IO ByteString
 asyncRecv sock num = do
     allocaBytes num $ \ptr -> do
         res <- asyncRecvPtr sock ptr num
@@ -108,7 +116,7 @@ asyncRecvPtr s@(AsyncSocket _ sock rdyRd _) ptr num = do
             throwErrno "unsafeRecvPtr failed"
     else return res
 
-asyncSend :: WrappedSocket -> BS.ByteString -> IO ()
+asyncSend :: WrappedSocket -> ByteString -> IO ()
 asyncSend s bs = BS.useAsCStringLen bs $ \(ptr, num) ->
     asyncSendPtr s (castPtr ptr) num
 
@@ -125,6 +133,16 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
     else if res /= num then
         asyncSendPtr s (ptr `plusPtr` res) (num - res)
     else return ()
+
+-- TODO handle chunked encoding
+-- TODO handle content length
+-- TODO handle lazy bytestring stuff
+
+parseStartLine :: ByteString -> (ByteString, HTTPMethod, ByteString)
+parseStartLine = undefined
+
+parseHeaders :: ByteString -> (ByteString, Headers)
+parseHeaders = undefined
 
 
 -- Build some kind of monad containing request?
@@ -152,40 +170,23 @@ instance Monad Request where
 execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
 execRequest (Request sockAct) req sock = sockAct (sock, req)
 
--- TODO parse start-line
--- TODO parse headers
--- TODO handle chunked encoding
--- TODO handle content length
-
-parseStartLine :: ByteString -> (ByteString, HTTPMethod, ByteString)
-parseStartLine = undefined
-
-parseHeaders :: ByteString -> (ByteString, Headers)
-parseHeaders = undefined
-
-
-data HTTPMethod = Get
-                | Post
-                | Head
-                | Delete
-
 data RequestInfo = RequestInfo
     {
         method :: HTTPMethod
-      , path :: BS.ByteString
-      , headers :: [(BS.ByteString, BS.ByteString)]
+      , path :: ByteString
+      , headers :: [(ByteString, ByteString)]
     }
 
 reqMethod :: Request HTTPMethod
 reqMethod = Request $ \ (_, info) -> return (method info)
 
-reqPath :: Request BS.ByteString
+reqPath :: Request ByteString
 reqPath = Request $ \ (_, info) -> return (path info)
 
-reqHeaders :: Request [(BS.ByteString, BS.ByteString)]
+reqHeaders :: Request [(ByteString, ByteString)]
 reqHeaders = Request $ \ (_, info) -> return (headers info)
 
-reqBodyChunk :: Int -> Request BS.ByteString
+reqBodyChunk :: Int -> Request ByteString
 reqBodyBytes = undefined
 
 withReqBodyBytes :: ([Word8] -> a) -> Request a
