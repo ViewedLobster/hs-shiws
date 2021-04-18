@@ -4,6 +4,7 @@ module HTTPParse (
       Parser
     , runParser
     , HTTPMethod
+    , HTTPStart
     , httpReqStart
     , httpHeaderField
     , httpHeaderFields
@@ -57,10 +58,10 @@ p </> p' = Parser (\ws -> let res = runParser p ws
 parseNothing = return ()
 parseEither p1 p2 = (Left <$> p1) </> (Right <$> p2)
 
-repeat p = do
+repetition p = do
     res <- parseEither p parseNothing
     case res of
-        Left a -> do as <- repeat p
+        Left a -> do as <- repetition p
                      return (a:as)
         _      -> return []
 
@@ -207,7 +208,7 @@ httpHeaderFieldsWithCRLF = do
                          return $ field:fields
         _          -> return []
 
-httpHeaderFields = repeat httpHeaderField
+httpHeaderFields = repetition httpHeaderField
 
 httpRequestInfo = do
     start <- httpReqStart
