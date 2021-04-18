@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module HTTPParse (
+module HTTPParse.Lazy (
       Parser
     , runParser
     , HTTPMethod
@@ -12,12 +12,13 @@ module HTTPParse (
     , httpRequestInfo
     , httpEmptyLine ) where
 
+import GHC.Int
 import Data.Char
 import Data.List
 import Data.Word (Word8)
-import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as CS
+import Data.ByteString.Lazy (ByteString)
+import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString.Lazy.Char8 as CS
 import Data.Either
 import Control.Applicative
 import Control.Monad
@@ -94,12 +95,12 @@ _char :: ByteString -> [(Char, ByteString)]
 _char bs | CS.null bs = []
          | otherwise  = [(CS.head bs, CS.tail bs)]
 
-safeTake :: Int -> ByteString -> Maybe ByteString
+safeTake :: Int64 -> ByteString -> Maybe ByteString
 safeTake n bs = if BS.length bs >= n then Just (BS.take n bs)
                                      else Nothing
 
 
-safeDrop :: Int -> ByteString -> Maybe ByteString
+safeDrop :: Int64 -> ByteString -> Maybe ByteString
 safeDrop n bs = if BS.length bs >= n then Just (BS.drop n bs)
                                      else Nothing
 
@@ -111,7 +112,7 @@ litByte c = filtr (c ==) byte
 lit c = filtr (== c) char
 
 -- Get n bytes
-bytes :: Int -> Parser ByteString
+bytes :: Int64 -> Parser ByteString
 bytes n = Parser (bytesInternal n)
 
 bytesInternal n bs = case safeTake n bs of
@@ -183,10 +184,28 @@ isVChar = (\d -> d >= 0x21 && d <= 0x7e) . ord
 isObsText = (>= 0x80) . ord -- We are working with 8 bit chars here
 isWsp c = c == ' ' || c == '\t'
 
-csdropWhileEnd pred = fst . CS.spanEnd pred
+fieldValue = Parser $ \bs -> case countFieldValue 0 bs of
+                                Just (i, bs'') -> [(BS.take i bs, bs'')]
+                                _              -> []
 
-strip = CS.dropWhile isSpace . csdropWhileEnd isSpace
-fieldValue = strip <$> (takeWhileChar $ \c -> isVChar c || isObsText c || isWsp c)
+countFieldValue cur bs =
+    case countWs bs of 
+        Just (wslen, bs') ->
+            case countFieldChar bs' of
+                Just (vcharlen, bs'') ->
+                    if vcharlen > 0 then
+                        countFieldValue (cur + wslen + vcharlen) bs''
+                    else
+                        Just (cur, bs'')
+                _              -> Nothing
+        _ -> Nothing
+
+countWs bs = case CS.findIndex (not . isWsp) bs of
+    Just i -> Just (i, BS.drop i bs)
+    _      -> Nothing
+countFieldChar bs = case CS.findIndex (not . (\c -> isVChar c || isObsText c)) bs of
+    Just i -> Just (i, BS.drop i bs)
+    _      -> Nothing
 
 httpEmptyLine = do
     byteSeq "\r\n"
@@ -199,6 +218,7 @@ httpHeaderField :: Parser (ByteString, ByteString)
 httpHeaderField = do
     key <- fieldName
     lit ':'
+    ows
     value <- fieldValue -- fieldValue strips leading and trailing opt. whitespace
     byteSeq "\r\n"
     return (key, value)

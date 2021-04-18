@@ -1,4 +1,4 @@
-{-# OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 import Control.Concurrent.MVar
 import Control.Concurrent
@@ -44,6 +44,8 @@ import Lowl.Socket (
 
 import HTTPParse (
       runParser
+    , HTTPMethod
+    , HTTPStart
     , httpReqStart
     , httpHeaderFields )
 
@@ -140,25 +142,18 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
 -- TODO handle content length
 -- TODO handle lazy bytestring stuff
 
-lazySocketBytes :: WrappedSocket -> Int -> ByteString
+lazySocketBytes :: WrappedSocket -> Int -> IO L.ByteString
 lazySocketBytes sock chunkSize = unsafeInterleaveIO $ do
     chunk <- asyncRecv sock chunkSize
     rest <- lazySocketBytes sock chunkSize
-    if L.length chunk == 0 then
+    if BS.length chunk == 0 then
         return (L.fromStrict chunk)
     else
         return ((L.fromStrict chunk) `L.append` rest)
-        
+
 -- lazy socket layer
 -- updating state to point to non-consumed data
 -- RequestData: takeN
-
-parseStartLine :: ByteString -> (ByteString, HTTPMethod, ByteString)
-parseStartLine = undefined
-
-parseHeaders :: ByteString -> (ByteString, Headers)
-parseHeaders = undefined
-
 
 -- Build some kind of monad containing request?
 
@@ -200,13 +195,6 @@ reqPath = Request $ \ (_, info) -> return (path info)
 
 reqHeaders :: Request [(ByteString, ByteString)]
 reqHeaders = Request $ \ (_, info) -> return (headers info)
-
-reqBodyChunk :: Int -> Request ByteString
-reqBodyBytes = undefined
-
-withReqBodyBytes :: ([Word8] -> a) -> Request a
-
-withReqBodyChunks :: ([ByteString] -> a) -> Request a
 
 handleRequest :: WrappedSocket -> IO ()
 handleRequest sock = do
