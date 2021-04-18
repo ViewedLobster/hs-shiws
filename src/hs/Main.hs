@@ -5,6 +5,7 @@ import Control.Concurrent
 import System.IO.Error
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as L
 import Foreign
 import Foreign.Ptr
 import Foreign.C.Error
@@ -16,6 +17,7 @@ import Control.Monad
 import Control.Applicative
 import Control.Monad
 
+import System.IO.Unsafe (unsafeInterleaveIO)
 
 import Lowl.EPoll (
       EPoll
@@ -137,6 +139,19 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
 -- TODO handle chunked encoding
 -- TODO handle content length
 -- TODO handle lazy bytestring stuff
+
+lazySocketBytes :: WrappedSocket -> Int -> ByteString
+lazySocketBytes sock chunkSize = unsafeInterleaveIO $ do
+    chunk <- asyncRecv sock chunkSize
+    rest <- lazySocketBytes sock chunkSize
+    if L.length chunk == 0 then
+        return (L.fromStrict chunk)
+    else
+        return ((L.fromStrict chunk) `L.append` rest)
+        
+-- lazy socket layer
+-- updating state to point to non-consumed data
+-- RequestData: takeN
 
 parseStartLine :: ByteString -> (ByteString, HTTPMethod, ByteString)
 parseStartLine = undefined
