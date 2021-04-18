@@ -1,6 +1,6 @@
 HSCSRC=		EPoll.hsc Socket.hsc
 FROMHSC=	$(HSCSRC:.hsc=.hs)
-SRC=		$(FROMHSC)
+SRC=		$(FROMHSC) HTTPParse.hs HTTPParse.Lazy.hs
 OBJS=		$(SRC:.hs=.o)
 
 BIN=		Main
@@ -10,7 +10,7 @@ BIN=		Main
 .SUFFIXES: .hsc .hs .o
 
 all: $(SRC)
-	ghc -threaded $(SRC) Main
+	ghc -threaded $(SRC) $(BIN)
 
 .hsc.hs:
 	hsc2hs -o $@ $< 
