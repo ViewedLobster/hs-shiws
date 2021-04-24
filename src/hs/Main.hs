@@ -6,6 +6,7 @@ import System.IO.Error
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
+import Data.ByteString.Builder as B
 import Foreign
 import Foreign.Ptr
 import Foreign.C.Error
@@ -15,7 +16,8 @@ import Data.List
 
 import Control.Monad
 import Control.Applicative
-import Control.Monad
+
+import Control.Monad.State
 
 import System.IO.Unsafe (unsafeInterleaveIO)
 
@@ -42,11 +44,12 @@ import Lowl.Socket (
     , close
     , unsafeUsingSocketFd )
 
-import HTTPParse.Lazy (
+import HTTPParse (
       runParser
     , HTTPMethod
-    , HTTPStart
+    , HTTPStart (..)
     , httpReqStart
+    , httpHeaders
     , httpHeaderFields
     , httpRequestInfo )
 
@@ -122,8 +125,10 @@ asyncRecvPtr s@(AsyncSocket _ sock rdyRd _) ptr num = do
     else return res
 
 asyncSend :: WrappedSocket -> ByteString -> IO ()
-asyncSend s bs = BS.useAsCStringLen bs $ \(ptr, num) ->
-    asyncSendPtr s (castPtr ptr) num
+asyncSend s bs = do
+    putStrLn $ "sending: " ++ show bs
+    BS.useAsCStringLen bs $ \(ptr, num) ->
+        asyncSendPtr s (castPtr ptr) num
 
 asyncSendPtr :: WrappedSocket -> Ptr Word8 -> Int -> IO ()
 asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
@@ -169,17 +174,102 @@ lazySocketChunks sock chunkSize = unsafeInterleaveIO $ do
 
 headerMax = 8192
 
-handleRequests :: WrappedSocket -> IO ()
-handleRequests sock = do
-    chunks <- lazySocketChunks sock 4096
-    putStrLn "lazysocketbytes"
-    let bytes = L.fromChunks chunks
-    case runParser httpRequestInfo bytes of
-        ((start, headers), afterHead):_ -> do
-            putStrLn $ show headers
-            helloWorld sock
-        _                               -> httpError400 sock
+--handleRequests :: WrappedSocket -> IO ()
+--handleRequests sock = do
+--    chunks <- lazySocketChunks sock 4096
+--    putStrLn "lazysocketbytes"
+--    let bytes = L.fromChunks chunks
+--    case runParser httpRequestInfo bytes of
+--        ((start, headers), afterHead):_ -> do
+--            putStrLn $ show headers
+--            helloWorld sock
+--        _                               -> httpError400 sock
+--
 
+-- TODO timeout for receive
+
+-- read bytes, parse, read bytes parse...
+--
+
+data Request = Request
+    {
+        method :: HTTPMethod
+      , path :: ByteString
+      , headers :: [(ByteString, ByteString)]
+      , body :: L.ByteString
+    }
+
+data ResponseCode = OK
+                  | BadRequest
+                  | InternalError
+
+toBytes :: ResponseCode -> B.Builder
+toBytes OK              = "200 OK"
+toBytes BadRequest      = "400 Bad Request"
+toBytes InternalError   = "500 Internal Error"
+
+data Response = ResponseBytes ResponseCode [(ByteString, ByteString)] B.Builder
+              | ResponseError ResponseCode
+
+headersToBytes =
+    foldl (<>) "" .
+    map (\ (name, val) ->
+           (byteString name) <> ": " <> (byteString val) <> "\r\n")
+
+respond :: WrappedSocket -> Response -> IO ()
+respond sock (ResponseBytes code hdrs bytes) = do
+    let bs = B.toLazyByteString $ "HTTP/1.1 " <> toBytes code <> "\r\n" <> headersToBytes hdrs <> "\r\n" <> bytes
+    mapM_ (asyncSend sock) (L.toChunks bs)
+
+respond sock (ResponseError code) = do
+    let bs = B.toLazyByteString $ "HTTP/1.1 " <> toBytes code <> "\r\n\r\n"
+    mapM_ (asyncSend sock) (L.toChunks bs)
+
+constructStart sock bytes = do
+    let res = runParser httpReqStart bytes
+    case res of
+        (start, rest):_ -> return (Just start, rest)
+        _   -> do
+            new <- asyncRecv sock 8192
+            constructStart sock (bytes <> new)
+
+constructHeaders sock bytes = tryHeaders sock bytes 0
+
+maxTriesHdrs = 5
+tryHeaders sock bytes try =
+    if try >= maxTriesHdrs then
+        return (Nothing, bytes)
+    else
+        case runParser httpHeaders bytes of
+            ((hdrs, True), rest):_ -> return (Just hdrs, rest)
+            ((hdrs, False), rest):_ -> do
+                new <- asyncRecv sock 8192
+                more <- tryHeaders sock (rest <> new) (try + 1)
+                case more of
+                    (Just mhdrs, rest) -> return (Just (hdrs ++ mhdrs), rest)
+                    _                  -> return more
+
+constructRequest sock bytes = do
+    (res, rest) <- constructStart sock bytes -- TODO make constructStart count tries
+    case res of
+        Just (HTTPReqStart meth path version) -> do
+            (res, rest) <- constructHeaders sock rest
+            case res of
+                Just hdrs -> do
+                    (bdy, rest) <- lazyBody hdrs rest sock
+                    return (Just (Request meth path hdrs bdy), rest)
+                _ -> return (Nothing, rest)
+        _ -> return (Nothing, rest)
+
+lazyBody :: [(ByteString, ByteString)] -> ByteString -> WrappedSocket -> IO (L.ByteString, ByteString)
+lazyBody _ _ _ = return (L.empty, BS.empty) -- TODO fix this
+
+handleRequest :: WrappedSocket -> (Request -> (Response -> IO ()) -> IO ()) -> IO ()
+handleRequest sock userRequest = do
+    (res, rest) <- constructRequest sock BS.empty
+    case res of
+        Just req -> userRequest req (respond sock)
+        Nothing -> respond sock (ResponseError BadRequest)
 
 helloWorld sock = asyncSend sock "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nHello, world!\r\n"
 
@@ -197,46 +287,51 @@ httpError400 sock =
 -- getHeaders
 -- getBodyContent
 --
-newtype Request a = Request ((WrappedSocket, RequestInfo) -> IO a)
+--newtype Request a = Request ((WrappedSocket, RequestInfo) -> IO a)
+--
+--instance Functor Request where
+--    fmap = liftM
+--
+--instance Applicative Request where
+--    pure a = Request (\ws -> return a)
+--    (<*>) = ap
+--
+--instance Monad Request where
+--    Request now >>= after =
+--        Request $ \req ->
+--            now req >>= \val -> let Request next = after val in next req
+--
+--execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
+--execRequest (Request sockAct) req sock = sockAct (sock, req)
+--
+--data RequestInfo = RequestInfo
+--    {
+--        method :: HTTPMethod
+--      , path :: ByteString
+--      , headers :: [(ByteString, ByteString)]
+--      , body :: L.ByteString
+--    }
+--
+--reqMethod :: Request HTTPMethod
+--reqMethod = Request $ \ (_, info) -> return (method info)
+--
+--reqPath :: Request ByteString
+--reqPath = Request $ \ (_, info) -> return (path info)
+--
+--reqHeaders :: Request [(ByteString, ByteString)]
+--reqHeaders = Request $ \ (_, info) -> return (headers info)
 
-instance Functor Request where
-    fmap = liftM
+--handleRequest :: WrappedSocket -> IO ()
+--handleRequest sock = do
+--    bs <- asyncRecv sock 1024
+--    if BS.length bs > 0 then do
+--        asyncSend sock bs
+--        handleRequest sock
+--    else return ()
+--
 
-instance Applicative Request where
-    pure a = Request (\ws -> return a)
-    (<*>) = ap
-
-instance Monad Request where
-    Request now >>= after =
-        Request $ \req ->
-            now req >>= \val -> let Request next = after val in next req
-
-execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
-execRequest (Request sockAct) req sock = sockAct (sock, req)
-
-data RequestInfo = RequestInfo
-    {
-        method :: HTTPMethod
-      , path :: ByteString
-      , headers :: [(ByteString, ByteString)]
-    }
-
-reqMethod :: Request HTTPMethod
-reqMethod = Request $ \ (_, info) -> return (method info)
-
-reqPath :: Request ByteString
-reqPath = Request $ \ (_, info) -> return (path info)
-
-reqHeaders :: Request [(ByteString, ByteString)]
-reqHeaders = Request $ \ (_, info) -> return (headers info)
-
-handleRequest :: WrappedSocket -> IO ()
-handleRequest sock = do
-    bs <- asyncRecv sock 1024
-    if BS.length bs > 0 then do
-        asyncSend sock bs
-        handleRequest sock
-    else return ()
+userRequestTest req resp = do
+    resp (ResponseBytes OK [("Content-Length", "15")] "Hello, world!\r\n")
 
 data EventSummary = SumRead
                   | SumWrite
@@ -287,7 +382,7 @@ handleEPollEvent epoll (evts, sock) = case sock of
                 -- TODO while there is more accepting
                 (sock, sockaddr) <- acceptNoBlock asock
                 wrapped <- wrapSocket epoll sock
-                forkFinally (handleRequests wrapped) (shutdownSocket wrapped)
+                forkFinally (handleRequest wrapped userRequestTest) (shutdownSocket wrapped)
                 putStrLn $ "forked thread handling request from: " ++ show sockaddr
             SumBoth -> ioError (userError "accepting socket encountered an error")
 
@@ -298,7 +393,7 @@ main = do
     putStrLn "Starting server on port 1234"
     epoll <- create
     asock <- socketNoBlock AF_INET SOCK_STREAM Default
-    bind asock $ InetAddress 0x7f000001 12345
+    bind asock $ InetAddress 0x7f000001 1234
     listen asock 64
     wrapped <- wrapAccept epoll asock
     let handleEpoll = wait 20 epoll >>= mapM (handleEPollEvent epoll) in

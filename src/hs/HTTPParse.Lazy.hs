@@ -3,14 +3,15 @@
 module HTTPParse.Lazy (
       Parser
     , runParser
-    , HTTPMethod
-    , HTTPStart
+    , HTTPMethod (..)
+    , HTTPStart (..)
     , httpReqStart
     , httpHeaderField
     , httpHeaderFields
     , httpHeaderFieldsWithCRLF
     , httpRequestInfo
-    , httpEmptyLine ) where
+    , httpEmptyLine
+    , httpHeaders ) where
 
 import GHC.Int
 import Data.Char
@@ -227,6 +228,13 @@ httpHeaderFieldsWithCRLF = do
         _          -> return []
 
 httpHeaderFields = repetition httpHeaderField
+
+httpHeaders = do
+    hdrs <- httpHeaderFields
+    end <- optl (byteSeq "\r\n")
+    case end of
+        Just _ -> return (hdrs, True)
+        _      -> return (hdrs, False)
 
 httpRequestInfo = do
     start <- httpReqStart
