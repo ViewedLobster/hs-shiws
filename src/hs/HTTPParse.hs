@@ -214,5 +214,6 @@ httpHeaderFields = repetition httpHeaderField
 
 httpRequestInfo = do
     start <- httpReqStart
-    fields <- httpHeaderFieldsWithCRLF
+    fields <- httpHeaderFields
+    byteSeq "\r\n"
     return (start, fields)

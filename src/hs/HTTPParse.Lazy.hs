@@ -23,6 +23,8 @@ import Data.Either
 import Control.Applicative
 import Control.Monad
 
+import Debug.Trace
+
 -- type Bytes = [Word8]
 
 newtype Parser a = Parser ( ByteString -> [(a, ByteString)] )
@@ -95,15 +97,6 @@ _char :: ByteString -> [(Char, ByteString)]
 _char bs | CS.null bs = []
          | otherwise  = [(CS.head bs, CS.tail bs)]
 
-safeTake :: Int64 -> ByteString -> Maybe ByteString
-safeTake n bs = if BS.length bs >= n then Just (BS.take n bs)
-                                     else Nothing
-
-
-safeDrop :: Int64 -> ByteString -> Maybe ByteString
-safeDrop n bs = if BS.length bs >= n then Just (BS.drop n bs)
-                                     else Nothing
-
 
 -- Get predetermined byte
 litByte :: Word8 -> Parser Word8
@@ -115,9 +108,12 @@ lit c = filtr (== c) char
 bytes :: Int64 -> Parser ByteString
 bytes n = Parser (bytesInternal n)
 
-bytesInternal n bs = case safeTake n bs of
-    Just bs' -> [(bs', BS.drop n bs)]
-    _        -> []
+bytesInternal n bs = let first = BS.take n bs
+                         rest  = BS.drop n bs in
+                         if BS.length first == n then
+                             [(first, rest)]
+                         else
+                             []
 
 takeWhileChar :: (Char -> Bool) -> Parser ByteString
 takeWhileChar pred = Parser $ (: []) . CS.span pred
@@ -234,5 +230,5 @@ httpHeaderFields = repetition httpHeaderField
 
 httpRequestInfo = do
     start <- httpReqStart
-    fields <- httpHeaderFieldsWithCRLF
+    fields <- httpHeaderFields
     return (start, fields)

@@ -77,6 +77,9 @@ toOpts oWord = filter (\o -> (fromOpt o .&. oWord) /= 0) allOpts
 -- TODO investigate use of Fd type?
 data EPoll a = EPoll CInt (TVar (Map CInt a))
 
+instance Show (EPoll a) where
+    show (EPoll fd _) = "EPoll " ++ show fd
+
 -- TODO handle multiple calls to ctl, we have no reference to data assigned to file descriptor
 
 data EPollEvent = EPollEvent
@@ -150,8 +153,10 @@ wait num (EPoll fd fdmap') = do
     mapped <- atomically (do
         fdmap <- readTVar fdmap'
         -- TODO use safe Map get
-        let mapEvt (evtWord, fdint) = (toEvts evtWord, fdmap ! fdint)
-            in return (map mapEvt evts))
+        let mapEvt (evtWord, fdint) = case Map.lookup fdint fdmap of
+                                          Just a -> [(toEvts evtWord, a)]
+                                          _      -> []
+            in return (evts >>= mapEvt))
     return mapped
 
 

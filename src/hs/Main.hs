@@ -42,16 +42,17 @@ import Lowl.Socket (
     , close
     , unsafeUsingSocketFd )
 
-import HTTPParse (
+import HTTPParse.Lazy (
       runParser
     , HTTPMethod
     , HTTPStart
     , httpReqStart
-    , httpHeaderFields )
+    , httpHeaderFields
+    , httpRequestInfo )
 
 newtype RdySignal = RdySignal (MVar (Bool, [MVar ()]))
 
-newRdySignal = RdySignal <$> (newMVar (False, []))
+newRdySignal = RdySignal <$> (newMVar (True, []))
 
 data WrappedSocket = AcceptSocket (EPoll WrappedSocket) Socket
                    | AsyncSocket (EPoll WrappedSocket) Socket RdySignal RdySignal
@@ -144,12 +145,46 @@ asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
 
 lazySocketBytes :: WrappedSocket -> Int -> IO L.ByteString
 lazySocketBytes sock chunkSize = unsafeInterleaveIO $ do
+    putStrLn $ "receiving chunk"
     chunk <- asyncRecv sock chunkSize
-    rest <- lazySocketBytes sock chunkSize
+    putStrLn $ "received chunk" ++ show chunk
     if BS.length chunk == 0 then
-        return (L.fromStrict chunk)
-    else
-        return ((L.fromStrict chunk) `L.append` rest)
+        return L.empty
+    else do
+        rest <- lazySocketBytes sock chunkSize
+        putStrLn $ "got rest"
+        return $ L.fromChunks ( chunk:(L.toChunks rest))
+
+lazySocketChunks :: WrappedSocket -> Int -> IO [ByteString]
+lazySocketChunks sock chunkSize = unsafeInterleaveIO $ do
+    putStrLn $ "receiving chunk"
+    chunk <- asyncRecv sock chunkSize
+    putStrLn $ "received chunk" ++ show chunk
+    if BS.length chunk == 0 then
+        return []
+    else do
+        rest <- lazySocketChunks sock chunkSize
+        putStrLn $ "got rest"
+        return $ chunk:rest
+
+headerMax = 8192
+
+handleRequests :: WrappedSocket -> IO ()
+handleRequests sock = do
+    chunks <- lazySocketChunks sock 4096
+    putStrLn "lazysocketbytes"
+    let bytes = L.fromChunks chunks
+    case runParser httpRequestInfo bytes of
+        ((start, headers), afterHead):_ -> do
+            putStrLn $ show headers
+            helloWorld sock
+        _                               -> httpError400 sock
+
+
+helloWorld sock = asyncSend sock "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nHello, world!\r\n"
+
+httpError400 sock =
+    asyncSend sock "HTTP/1.1 400 Bad Request"
 
 -- lazy socket layer
 -- updating state to point to non-consumed data
@@ -160,7 +195,6 @@ lazySocketBytes sock chunkSize = unsafeInterleaveIO $ do
 -- getType
 -- getPath
 -- getHeaders
--- getBody - this should return some kind of lazy datatype?
 -- getBodyContent
 --
 newtype Request a = Request ((WrappedSocket, RequestInfo) -> IO a)
@@ -242,14 +276,18 @@ handleEPollEvent epoll (evts, sock) = case sock of
         case summary evts of
             SumBoth -> do wakeupOrSet rd
                           wakeupOrSet wr
-            SumRead -> wakeupOrSet rd
-            _       -> wakeupOrSet wr
+                          putStrLn $ "read/write event on " ++ show epoll
+            SumRead -> do wakeupOrSet rd
+                          putStrLn $ "read event on " ++ show epoll
+            _       -> do wakeupOrSet wr
+                          putStrLn $ "write event on " ++ show epoll
     AcceptSocket epoll asock ->
         case summary evts of
             SumRead -> do
+                -- TODO while there is more accepting
                 (sock, sockaddr) <- acceptNoBlock asock
                 wrapped <- wrapSocket epoll sock
-                forkFinally (handleRequest wrapped) (shutdownSocket wrapped)
+                forkFinally (handleRequests wrapped) (shutdownSocket wrapped)
                 putStrLn $ "forked thread handling request from: " ++ show sockaddr
             SumBoth -> ioError (userError "accepting socket encountered an error")
 
@@ -257,10 +295,10 @@ handleEPollEvent epoll (evts, sock) = case sock of
 infinitely action = action >> infinitely action
 
 main = do
-    putStrLn "Starting server"
+    putStrLn "Starting server on port 1234"
     epoll <- create
     asock <- socketNoBlock AF_INET SOCK_STREAM Default
-    bind asock $ InetAddress 0x7f000001 1234
+    bind asock $ InetAddress 0x7f000001 12345
     listen asock 64
     wrapped <- wrapAccept epoll asock
     let handleEpoll = wait 20 epoll >>= mapM (handleEPollEvent epoll) in
