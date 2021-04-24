@@ -6,6 +6,7 @@ module Lowl.EPoll (
     , EPollOpt (..)
     , wait
     , create
+    , close
     , register
     , unregister
     , reregister

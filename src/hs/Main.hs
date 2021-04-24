@@ -2,7 +2,6 @@
 
 import Control.Concurrent.MVar
 import Control.Concurrent
-import System.IO.Error
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
@@ -19,8 +18,12 @@ import Control.Applicative
 
 import Control.Monad.State
 
+import System.IO.Error
 import System.IO.Unsafe (unsafeInterleaveIO)
+import System.Console.GetOpt
+import System.Environment
 
+import qualified Lowl.EPoll as EP
 import Lowl.EPoll (
       EPoll
     , EPollEvt (..)
@@ -367,6 +370,17 @@ shutdownSocket wrapped (Left exc) = do
 
 shutdownSocket wrapped _ = killSocket wrapped
 
+acceptConnections :: EPoll WrappedSocket -> Socket -> IO ()
+acceptConnections epoll asock = do
+    accepted <- acceptNoBlock asock
+    case accepted of
+        Just (sock, sockaddr) -> do
+            wrapped <- wrapSocket epoll sock
+            forkFinally (handleRequest wrapped userRequestTest) (shutdownSocket wrapped)
+            putStrLn $ "forked thread handling request from: " ++ show sockaddr
+            acceptConnections epoll asock
+        _ -> return ()
+
 handleEPollEvent epoll (evts, sock) = case sock of
     AsyncSocket epoll sock rd wr ->
         case summary evts of
@@ -379,25 +393,53 @@ handleEPollEvent epoll (evts, sock) = case sock of
                           putStrLn $ "write event on " ++ show epoll
     AcceptSocket epoll asock ->
         case summary evts of
-            SumRead -> do
-                -- TODO while there is more accepting
-                (sock, sockaddr) <- acceptNoBlock asock
-                wrapped <- wrapSocket epoll sock
-                forkFinally (handleRequest wrapped userRequestTest) (shutdownSocket wrapped)
-                putStrLn $ "forked thread handling request from: " ++ show sockaddr
+            SumRead -> acceptConnections epoll asock
             SumBoth -> ioError (userError "accepting socket encountered an error")
 
 
 infinitely action = action >> infinitely action
 
+data ServerOptions = ServerOptions {
+    address :: Word32,
+    port :: Word16
+}
+
+options =
+ [
+--    Option ['a'] ["address"] (ReqArg (\val opts -> parseAddress val >>= \addr ->
+--                                                   return (opts { address = addr })) "ADDRESS") "bind address ADDRESS",
+    Option ['p']
+           ["port"]
+           (ReqArg (\val opts -> (let parsed = (read val) :: Int in
+                                    if parsed > 0xffff || parsed <= 0 then
+                                        Left "invalid port number"
+                                    else
+                                        Right (fromIntegral parsed)) >>= \p ->
+                                            return (opts { port = p })) "PORTNUM")
+           "bind port PORTNUM"
+ ]
+
+defaultOptions = ServerOptions { address = 0, port = 80 }
+
+config argv =
+    case getOpt Permute options argv of
+        (o,n,[]) -> case foldl (>>=) (Right defaultOptions) o of
+                        Right opt -> return opt
+                        Left err -> ioError (userError (err ++ usage))
+        (_,_,errs) -> ioError (userError (concat errs ++ usage))
+  where usage = " (Valid options: -p PORTNUM, -a ADDRESS)"
+
 main = do
-    putStrLn "Starting server on port 1234"
+    argv <- getArgs
+    opts <- config argv
+    putStrLn $ "Starting server on port " ++ show (port opts)
     epoll <- create
     asock <- socketNoBlock AF_INET SOCK_STREAM Default
-    bind asock $ InetAddress 0x7f000001 1234
+    bind asock $ InetAddress (address opts) (port opts)
     listen asock 64
     wrapped <- wrapAccept epoll asock
     let handleEpoll = wait 20 epoll >>= mapM (handleEPollEvent epoll) in
         catchIOError (infinitely handleEpoll)
-                     (\exc -> putStrLn ("Main error: " ++ show exc) >> killSocket wrapped)
+                     (\exc -> putStrLn ("Main error: " ++ show exc) >>
+                              killSocket wrapped >> EP.close epoll)
 

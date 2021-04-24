@@ -118,7 +118,6 @@ socketNoBlock dom tpe proto = do
         throwErrno "socket() failed"
     else do
         setNoBlockFd ret
-        putStrLn $ "socketNoBlock created fd: " ++ show ret
         info <- newIORef (SockInfo ret SockOpen dom)
         return (Socket info)
 
@@ -151,9 +150,8 @@ addrSize dom = case dom of
 peekAddr dom _ = case dom of
     AF_INET -> peekInet
 
--- Blocks if socket is non-blocking, use with caution
--- check for EAGAIN and EWOULDBLOCK
-acceptNoBlock :: Socket -> IO (Socket, SockAddress)
+-- Blocks execution thread if socket is blocking, use with caution
+acceptNoBlock :: Socket -> IO (Maybe (Socket, SockAddress))
 acceptNoBlock (Socket ref) = do
     SockInfo fd _ dom <- readIORef ref
     let sz = addrSize dom in
@@ -161,15 +159,19 @@ acceptNoBlock (Socket ref) = do
             poke ptrlen (fromIntegral sz)
             res <- c_accept4 fd ptr ptrlen (#const SOCK_NONBLOCK)
             if res == -1 then do
-                throwErrno "accept4()"
+                errno <- getErrno
+                if errno == eAGAIN || errno == eWOULDBLOCK then
+                    return Nothing
+                else
+                    throwErrno "accept4()"
             else do
                 addrlen <- peek ptrlen
                 addr <- peekAddr dom addrlen ptr
                 ref <- newIORef (SockInfo res SockOpen dom)
-                return (Socket ref, addr)
+                return $ Just (Socket ref, addr)
 
-f_GETFD = (#const F_GETFD) :: CInt
-f_SETFD = (#const F_SETFD) :: CInt
+f_GETFL = (#const F_GETFL) :: CInt
+f_SETFL = (#const F_SETFL) :: CInt
 
 setNoBlock :: Socket -> IO ()
 setNoBlock (Socket ref) = do
@@ -178,13 +180,13 @@ setNoBlock (Socket ref) = do
 
 setNoBlockFd :: CInt -> IO ()
 setNoBlockFd fd = do
-    res <- c_fcntl3 fd f_GETFD 0
+    res <- c_fcntl3 fd f_GETFL 0
     if res == -1 then
-        throwErrno "fcntl(F_GETFD)"
+        throwErrno "fcntl(F_GETFL)"
     else do
-        res <- c_fcntl3 fd f_SETFD (res .|. (#const O_NONBLOCK))
+        res <- c_fcntl3 fd f_SETFL (res .|. (#const O_NONBLOCK))
         if res == -1 then
-            throwErrno "fcntl(F_SETFD)"
+            throwErrno "fcntl(F_SETFL)"
         else return ()
 
 replayIfInterruptedThrow syscall errmesg = do
