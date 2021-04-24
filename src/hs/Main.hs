@@ -55,7 +55,7 @@ import HTTPParse (
 
 newtype RdySignal = RdySignal (MVar (Bool, [MVar ()]))
 
-newRdySignal = RdySignal <$> (newMVar (True, []))
+newRdySignal = RdySignal <$> (newMVar (False,  []))
 
 data WrappedSocket = AcceptSocket (EPoll WrappedSocket) Socket
                    | AsyncSocket (EPoll WrappedSocket) Socket RdySignal RdySignal
@@ -84,6 +84,7 @@ killSocket wrapped = do
         unsafeUsingSocketFd sock $ \sfd -> do
             unregister epoll sfd
             close sock
+
 
 waitOrReset :: RdySignal -> IO ()
 waitOrReset (RdySignal sig) = do
@@ -114,11 +115,11 @@ asyncRecv sock num = do
 
 asyncRecvPtr :: WrappedSocket -> Ptr Word8 -> Int -> IO Int
 asyncRecvPtr s@(AsyncSocket _ sock rdyRd _) ptr num = do
-    waitOrReset rdyRd
     res <- unsafeRecvPtr sock ptr num
     if res == -1 then do
         errno <- getErrno
-        if errno == eAGAIN || errno == eWOULDBLOCK then
+        if errno == eAGAIN || errno == eWOULDBLOCK then do
+            waitOrReset rdyRd
             asyncRecvPtr s ptr num
         else
             throwErrno "unsafeRecvPtr failed"
@@ -132,11 +133,11 @@ asyncSend s bs = do
 
 asyncSendPtr :: WrappedSocket -> Ptr Word8 -> Int -> IO ()
 asyncSendPtr s@(AsyncSocket _ sock _ rdyWr) ptr num = do
-    waitOrReset rdyWr
     res <- unsafeSendPtr sock ptr num
     if res == -1 then do
         errno <- getErrno
-        if errno == eAGAIN || errno == eWOULDBLOCK then
+        if errno == eAGAIN || errno == eWOULDBLOCK then do
+            waitOrReset rdyWr
             asyncSendPtr s ptr num
         else
             throwErrno "unsafeSendPtr failed"
