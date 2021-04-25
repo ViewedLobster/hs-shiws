@@ -12,6 +12,8 @@ import Foreign.C.Error
 import Foreign.C.String
 import Data.Word
 import Data.List
+import Data.Bits
+import Text.Read ( readMaybe )
 
 import Control.Monad
 import Control.Applicative
@@ -88,30 +90,35 @@ killSocket wrapped = do
             unregister epoll sfd
             close sock
 
+reset :: RdySignal -> IO ()
+reset (RdySignal sig) = modifyMVarMasked_ sig $ \(_, waiting) ->
+    return (False, waiting)
 
 waitOrReset :: RdySignal -> IO ()
 waitOrReset (RdySignal sig) = do
-    (avail, waiting) <- takeMVar sig
-    if avail then do
-        putMVar sig (False, waiting)
-        return ()
-    else do
-        empty <- newEmptyMVar
-        putMVar sig (False, empty:waiting)
-        takeMVar empty
-
+    wait <- modifyMVarMasked sig $ \(avail, waiting) ->
+        if avail then
+            return ((False, waiting), Nothing)
+        else do
+            empty <- newEmptyMVar
+            return ((False, empty:waiting), Just empty)
+    case wait of
+        Just empty -> takeMVar empty
+        _          -> return ()
+        
 wakeupOrSet :: RdySignal -> IO ()
 wakeupOrSet (RdySignal sig) = do
-    (_, waiting) <- takeMVar sig
-    case waiting of
-        first:rest -> do
-            putMVar sig (False, rest)
-            putMVar first ()
-        _          ->
-            putMVar sig (True, waiting)
+    wake <- modifyMVarMasked sig $ \(_, waiting) -> 
+        case waiting of
+            first:rest -> return ((False, rest), Just first)
+            _          -> return ((True, waiting), Nothing)
+    case wake of
+        Just empty -> putMVar empty ()
+        _          -> return ()
 
 asyncRecv :: WrappedSocket -> Int -> IO ByteString
-asyncRecv sock num = do
+asyncRecv sock@(AsyncSocket _ _ rdyRd _) num = do
+    reset rdyRd
     allocaBytes num $ \ptr -> do
         res <- asyncRecvPtr sock ptr num
         BS.packCStringLen (castPtr ptr, res)
@@ -129,8 +136,8 @@ asyncRecvPtr s@(AsyncSocket _ sock rdyRd _) ptr num = do
     else return res
 
 asyncSend :: WrappedSocket -> ByteString -> IO ()
-asyncSend s bs = do
-    putStrLn $ "sending: " ++ show bs
+asyncSend s@(AsyncSocket _ _ _ rdyWr) bs = do
+    reset rdyWr
     BS.useAsCStringLen bs $ \(ptr, num) ->
         asyncSendPtr s (castPtr ptr) num
 
@@ -177,23 +184,6 @@ lazySocketChunks sock chunkSize = unsafeInterleaveIO $ do
         return $ chunk:rest
 
 headerMax = 8192
-
---handleRequests :: WrappedSocket -> IO ()
---handleRequests sock = do
---    chunks <- lazySocketChunks sock 4096
---    putStrLn "lazysocketbytes"
---    let bytes = L.fromChunks chunks
---    case runParser httpRequestInfo bytes of
---        ((start, headers), afterHead):_ -> do
---            putStrLn $ show headers
---            helloWorld sock
---        _                               -> httpError400 sock
---
-
--- TODO timeout for receive
-
--- read bytes, parse, read bytes parse...
---
 
 data Request = Request
     {
@@ -275,64 +265,6 @@ handleRequest sock userRequest = do
         Just req -> userRequest req (respond sock)
         Nothing -> respond sock (ResponseError BadRequest)
 
-helloWorld sock = asyncSend sock "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\nHello, world!\r\n"
-
-httpError400 sock =
-    asyncSend sock "HTTP/1.1 400 Bad Request"
-
--- lazy socket layer
--- updating state to point to non-consumed data
--- RequestData: takeN
-
--- Build some kind of monad containing request?
-
--- getType
--- getPath
--- getHeaders
--- getBodyContent
---
---newtype Request a = Request ((WrappedSocket, RequestInfo) -> IO a)
---
---instance Functor Request where
---    fmap = liftM
---
---instance Applicative Request where
---    pure a = Request (\ws -> return a)
---    (<*>) = ap
---
---instance Monad Request where
---    Request now >>= after =
---        Request $ \req ->
---            now req >>= \val -> let Request next = after val in next req
---
---execRequest :: Request a -> RequestInfo -> WrappedSocket -> IO a
---execRequest (Request sockAct) req sock = sockAct (sock, req)
---
---data RequestInfo = RequestInfo
---    {
---        method :: HTTPMethod
---      , path :: ByteString
---      , headers :: [(ByteString, ByteString)]
---      , body :: L.ByteString
---    }
---
---reqMethod :: Request HTTPMethod
---reqMethod = Request $ \ (_, info) -> return (method info)
---
---reqPath :: Request ByteString
---reqPath = Request $ \ (_, info) -> return (path info)
---
---reqHeaders :: Request [(ByteString, ByteString)]
---reqHeaders = Request $ \ (_, info) -> return (headers info)
-
---handleRequest :: WrappedSocket -> IO ()
---handleRequest sock = do
---    bs <- asyncRecv sock 1024
---    if BS.length bs > 0 then do
---        asyncSend sock bs
---        handleRequest sock
---    else return ()
---
 
 userRequestTest req resp = do
     resp (ResponseBytes OK [("Content-Length", "15")] "Hello, world!\r\n")
@@ -386,11 +318,11 @@ handleEPollEvent epoll (evts, sock) = case sock of
         case summary evts of
             SumBoth -> do wakeupOrSet rd
                           wakeupOrSet wr
-                          putStrLn $ "read/write event on " ++ show epoll
+                          putStrLn $ "r/w event on " ++ show epoll
             SumRead -> do wakeupOrSet rd
-                          putStrLn $ "read event on " ++ show epoll
+                          putStrLn $ "r event on " ++ show epoll
             _       -> do wakeupOrSet wr
-                          putStrLn $ "write event on " ++ show epoll
+                          putStrLn $ "w event on " ++ show epoll
     AcceptSocket epoll asock ->
         case summary evts of
             SumRead -> acceptConnections epoll asock
@@ -404,10 +336,39 @@ data ServerOptions = ServerOptions {
     port :: Word16
 }
 
+splitAtChar :: Char -> String -> [String]
+splitAtChar c s =
+    let (h, rest) = span (/= c) s in
+        case rest of
+           _:_ -> h:(splitAtChar c (tail rest))
+           _   -> h:[]
+
+rmayMod :: String -> [Word32] -> Maybe ([Word32])
+rmayMod s l = case (readMaybe s) :: Maybe Word32 of
+                  Just i -> if i < 256 then
+                                Just (i:l)
+                            else
+                                Nothing
+                  _      -> Nothing
+
+addressParts :: String -> Maybe [Word32]
+addressParts = foldr (flip (>>=)) (Just []) . map rmayMod . splitAtChar '.'
+
+
+parseAddress s = case addressParts s of
+    Just (a:b:c:d:[]) -> Right (fromIntegral $ (a `shiftL` 24) .|.
+                                               (b `shiftL` 16) .|.
+                                               (c `shiftL` 8)  .|.  d)
+    _ -> Left "invalid address format"
+
+
 options =
  [
---    Option ['a'] ["address"] (ReqArg (\val opts -> parseAddress val >>= \addr ->
---                                                   return (opts { address = addr })) "ADDRESS") "bind address ADDRESS",
+    Option ['a']
+           ["address"]
+           (ReqArg (\val opts -> parseAddress val >>= \addr ->
+                                     return (opts { address = addr })) "ADDRESS")
+           "bind address ADDRESS",
     Option ['p']
            ["port"]
            (ReqArg (\val opts -> (let parsed = (read val) :: Int in
