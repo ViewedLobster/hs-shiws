@@ -343,8 +343,8 @@ splitAtChar c s =
            _:_ -> h:(splitAtChar c (tail rest))
            _   -> h:[]
 
-rmayMod :: String -> [Word32] -> Maybe ([Word32])
-rmayMod s l = case (readMaybe s) :: Maybe Word32 of
+partCons :: String -> [Word32] -> Maybe ([Word32])
+partCons s l = case (readMaybe s) :: Maybe Word32 of
                   Just i -> if i < 256 then
                                 Just (i:l)
                             else
@@ -352,7 +352,7 @@ rmayMod s l = case (readMaybe s) :: Maybe Word32 of
                   _      -> Nothing
 
 addressParts :: String -> Maybe [Word32]
-addressParts = foldr (flip (>>=)) (Just []) . map rmayMod . splitAtChar '.'
+addressParts = foldr (flip (>>=)) (Just []) . map partCons . splitAtChar '.'
 
 
 parseAddress s = case addressParts s of
@@ -388,7 +388,7 @@ config argv =
                         Right opt -> return opt
                         Left err -> ioError (userError (err ++ usage))
         (_,_,errs) -> ioError (userError (concat errs ++ usage))
-  where usage = " (Valid options: -p PORTNUM, -a ADDRESS)"
+  where usage = " -- Usage: -p PORTNUM, -a ADDRESS"
 
 main = do
     argv <- getArgs
